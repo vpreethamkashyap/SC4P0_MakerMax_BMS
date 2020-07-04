@@ -1,0 +1,2 @@
+soc.c:17:7:calcdeltaAh	0	static
+soc.c:25:7:socByOCV	0	static

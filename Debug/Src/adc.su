@@ -1,0 +1,11 @@
+adc.c:43:19:LTC2990_ConfigureControlReg	32	static
+adc.c:58:19:LTC2990_Trigger	32	static
+adc.c:71:19:LTC2990_WaitForConversion	56	static
+adc.c:95:19:LTC2990_ReadVcc	48	static
+adc.c:126:19:LTC2990_ReadV3	48	static
+adc.c:157:19:LTC2990_ReadV4	48	static
+adc.c:188:19:LTC2990_ReadV2	48	static
+adc.c:219:19:LTC2990_ReadV1	48	static
+adc.c:253:19:LTC2990_ReadCurrent	8	static
+adc.c:261:19:LTC2990_ReadTemperature	48	static
+adc.c:294:19:LTC2990_ReadVoltage	0	static
