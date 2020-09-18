@@ -23,6 +23,8 @@
 #include "stm32f3xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "mb.h"
+#include "mbport.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +55,8 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+extern uint16_t downcounter;
+
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -61,6 +65,7 @@ extern TIM_HandleTypeDef htim6;
 extern TIM_HandleTypeDef htim7;
 extern TIM_HandleTypeDef htim16;
 extern TIM_HandleTypeDef htim17;
+extern UART_HandleTypeDef huart1;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -245,6 +250,35 @@ void TIM1_TRG_COM_TIM17_IRQHandler(void)
 }
 
 /**
+  * @brief This function handles USART1 global interrupt / USART1 wake-up interrupt through EXTI line 25.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+
+  uint32_t tmp_flag = __HAL_UART_GET_FLAG(&huart1, UART_FLAG_RXNE);
+  uint32_t tmp_it_source = __HAL_UART_GET_IT_SOURCE(&huart1, UART_IT_RXNE);
+
+  if((tmp_flag != RESET) && (tmp_it_source != RESET)) {
+    pxMBFrameCBByteReceived();
+	  //xMBRTUReceiveFSM();
+    __HAL_UART_CLEAR_PEFLAG(&huart1);
+    return;
+  }
+
+  if((__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TXE) != RESET) &&(__HAL_UART_GET_IT_SOURCE(&huart1, UART_IT_TXE) != RESET)) {
+    pxMBFrameCBTransmitterEmpty();
+    return ;
+  }
+
+  /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
+}
+
+/**
   * @brief This function handles TIM6 global interrupt and DAC1 underrun interrupt.
   */
 void TIM6_DAC_IRQHandler(void)
@@ -265,6 +299,15 @@ void TIM6_DAC_IRQHandler(void)
 void TIM7_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM7_IRQn 0 */
+
+  if(__HAL_TIM_GET_FLAG(&htim7, TIM_FLAG_UPDATE) != RESET && __HAL_TIM_GET_IT_SOURCE(&htim7, TIM_IT_UPDATE) !=RESET)
+  {
+	__HAL_TIM_CLEAR_IT(&htim7, TIM_IT_UPDATE);
+	if (!--downcounter)
+	{
+		pxMBPortCBTimerExpired();
+	}
+  }
 
   /* USER CODE END TIM7_IRQn 0 */
   HAL_TIM_IRQHandler(&htim7);

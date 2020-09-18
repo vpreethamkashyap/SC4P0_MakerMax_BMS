@@ -44,12 +44,31 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include <stdio.h>
+#include <string.h>
 #include "oled.h"
 #include "adc.h"
 #include "soc.h"
 #include "sochelper.h"
+#include "power.h"
+#include "mb.h"
+#include "mbport.h"
 
 /* USER CODE END Includes */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+#define REG_INPUT_START 1000
+#define REG_INPUT_NREGS 9
+#define REG_HOLDING_START 2000
+#define REG_HOLDING_NREGS 8
+
+static USHORT usRegInputStart = REG_INPUT_START;
+static USHORT usRegInputBuf[REG_INPUT_NREGS];
+static USHORT usRegHoldingStart = REG_HOLDING_START;
+static USHORT usRegHoldingBuf[REG_HOLDING_NREGS];
+
+/* USER CODE END 0 */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -76,6 +95,7 @@ TIM_HandleTypeDef htim7;
 TIM_HandleTypeDef htim16;
 TIM_HandleTypeDef htim17;
 
+UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
@@ -96,10 +116,11 @@ typedef enum
 STATE currentState = IDLE;
 uint8_t currentDchgPct = 0;
 static float lastReadBattV = 0;
-static float lastReadCurr = 0;
+static float lastReadCurr_mA = 0;
 static float currentCellSOC = 0;
 static float currChargeRemaining = 0; //Ah how much charge is remaining inside the cell
 static const float fullChargeCapacity = 3.0; //Ah //TODO: change this as per your cell
+static float lastComputedPower = 0;
 
 /* USER CODE END PV */
 
@@ -111,8 +132,9 @@ static void MX_I2C1_Init(void);
 static void MX_TIM6_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM7_Init(void);
-static void MX_TIM16_Init(void); //SOC calculation - tick every 1 secs
-static void MX_TIM17_Init(void); //Polarization calculation - tick every 5 secs
+static void MX_TIM16_Init(void);
+static void MX_TIM17_Init(void);
+static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void Charging_Enable(CHG_EN chg_en);
 void Change_State(STATE new_state);
@@ -120,6 +142,31 @@ void Discharging_Set(uint8_t pct);
 void Safety_Loop();
 void getLatestADCValues();
 void updateOLED();
+void updateSerialPort();
+void updateModbusInputRegisters();
+void calcSOC(float ocv_V, float chargeRemain_Ah);
+
+/* USER CODE END PFP */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_DAC1_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_TIM6_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_TIM7_Init(void);
+static void MX_TIM16_Init(void);
+static void MX_TIM17_Init(void);
+static void MX_USART1_UART_Init(void);
+/* USER CODE BEGIN PFP */
+void Charging_Enable(CHG_EN chg_en);
+void Change_State(STATE new_state);
+void Discharging_Set(uint8_t pct);
+void Safety_Loop();
+void getLatestADCValues();
+void updateOLED();
+void updateSerialPort();
 void calcSOC(float ocv_V, float chargeRemain_Ah);
 
 /* USER CODE END PFP */
@@ -136,6 +183,7 @@ void calcSOC(float ocv_V, float chargeRemain_Ah);
 int main(void)
 {
   /* USER CODE BEGIN 1 */
+	eMBErrorCode    eStatus;
 
   /* USER CODE END 1 */
   
@@ -165,6 +213,7 @@ int main(void)
   MX_TIM7_Init();
   MX_TIM16_Init();
   MX_TIM17_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
   //Initialize OLED display
@@ -172,16 +221,30 @@ int main(void)
 
   ssd1306_Fill(Black);
   //ssd1306_SetCursor(10,30);
-  ssd1306_WriteString("MakerMax", Font_11x18, White);
+  //ssd1306_WriteString("MakerMax", Font_11x18, White);
   //ssd1306_UpdateScreen();
 
   //Initial ADC
   LTC2990_ConfigureControlReg(&hi2c1);
 
   //Initialize TIM7 to run safety loop
-  HAL_TIM_Base_Start_IT(&htim7);
-
+  //HAL_TIM_Base_Start_IT(&htim7);
   HAL_TIM_Base_Start_IT(&htim16);
+
+  /* ABCDEF */
+  usRegInputBuf[0] = 11;
+  usRegInputBuf[1] = 22;
+  usRegInputBuf[2] = 33;
+  usRegInputBuf[3] = 44;
+  usRegInputBuf[4] = 55;
+  usRegInputBuf[5] = 66;
+  usRegInputBuf[6] = 77;
+  usRegInputBuf[7] = 88;
+
+  eStatus = eMBInit( MB_RTU, 0x0A, 0, 38400, MB_PAR_NONE );
+
+  /* Enable the Modbus Protocol Stack. */
+  eStatus = eMBEnable();
 
   /* USER CODE END 2 */
  
@@ -194,55 +257,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+	 getLatestADCValues();
+	 calcSOC(lastReadBattV, currChargeRemaining);
+	 lastComputedPower = computePower(lastReadBattV);
+	 updateOLED();
+	 updateModbusInputRegisters();
+	 //updateSerialPort();
+	 //HAL_Delay(1000); //Update rate to 1s
 
-	  //Trigger a new conversion
-	  LTC2990_Trigger(&hi2c1);
-	  LTC2990_WaitForConversion(&hi2c1, 100);
-
-	  //Quick ADC test - Read Vcc
-	  float voltageADCVcc = 0;
-	  LTC2990_ReadVoltage(&hi2c1, VCC, &voltageADCVcc);
-
-	  //Current reading
-	  float current = 0;
-	  float battV = 0;
-	  float battV_2 = 0;
-	  LTC2990_ReadVoltage(&hi2c1, BATTV, &battV);
-	  LTC2990_ReadVoltage(&hi2c1, BATTV_2, &battV_2);
-
-	  LTC2990_ReadCurrent(&hi2c1, battV, battV_2, &current);
-
-
-	  char voltageADCVccString[10];
-	  sprintf(voltageADCVccString, "%.3f V",voltageADCVcc);
-	  ssd1306_SetCursor(15,25);
-	  ssd1306_WriteString("Vcc   ", Font_7x10, White);
-	  ssd1306_SetCursor(52,25);
-	  ssd1306_WriteString(voltageADCVccString, Font_7x10, White);
-
-	  //Show current on OLED
-	  char currentString[10];
-	  sprintf(currentString, "%.3f mA",current);
-	  ssd1306_SetCursor(15,37);
-	  ssd1306_WriteString("Cur  ", Font_7x10, White);
-	  ssd1306_SetCursor(52,37);
-	  ssd1306_WriteString(currentString, Font_7x10, White);
-
-	  //Battery voltage
-	  char battVString[10];
-	  sprintf(battVString, "%.3f V",battV);
-	  ssd1306_SetCursor(15,49);
-	  ssd1306_WriteString("BattV   ", Font_7x10, White);
-	  ssd1306_SetCursor(52,49);
-	  ssd1306_WriteString(battVString, Font_7x10, White);
-
-	  //Update lastReadBattV
-	  lastReadBattV = battV;
-
-	  ssd1306_UpdateScreen();
-
-	  HAL_Delay(1000); //Update rate to 1s
-
+	 //Modbus Poll routine
+	 eMBPoll();
   }
   /* USER CODE END 3 */
 }
@@ -283,8 +307,10 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART2|RCC_PERIPHCLK_I2C1
-                              |RCC_PERIPHCLK_TIM16|RCC_PERIPHCLK_TIM17;
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1|RCC_PERIPHCLK_USART2
+                              |RCC_PERIPHCLK_I2C1|RCC_PERIPHCLK_TIM16
+                              |RCC_PERIPHCLK_TIM17;
+  PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK2;
   PeriphClkInit.Usart2ClockSelection = RCC_USART2CLKSOURCE_PCLK1;
   PeriphClkInit.I2c1ClockSelection = RCC_I2C1CLKSOURCE_HSI;
   PeriphClkInit.Tim16ClockSelection = RCC_TIM16CLK_HCLK;
@@ -435,9 +461,9 @@ static void MX_TIM7_Init(void)
 
   /* USER CODE END TIM7_Init 1 */
   htim7.Instance = TIM7;
-  htim7.Init.Prescaler = 36000;
+  htim7.Init.Prescaler = 0;
   htim7.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim7.Init.Period = 2000;
+  htim7.Init.Period = 0;
   htim7.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim7) != HAL_OK)
   {
@@ -516,6 +542,43 @@ static void MX_TIM17_Init(void)
   /* USER CODE BEGIN TIM17_Init 2 */
 
   /* USER CODE END TIM17_Init 2 */
+
+}
+
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART1_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 38400;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  huart1.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
+  huart1.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  //HAL_UART_Transmit(&huart1, (uint8_t *)'I' , 1, 10);
+
+  /* USER CODE END USART1_Init 2 */
 
 }
 
@@ -618,14 +681,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		{
 			if(currentState == IDLE)
 			{
+				HAL_GPIO_WritePin(GPIOA, LD2_Pin|LED_USR2_Pin, GPIO_PIN_SET);
 				Change_State(CHG);
 			}
 			else if(currentState == CHG)
 			{
+				HAL_GPIO_WritePin(GPIOA, LD2_Pin|LED_USR2_Pin, GPIO_PIN_SET);
 				Change_State(DCHG);
 			}
 			else if(currentState == DCHG)
 			{
+				HAL_GPIO_WritePin(GPIOA, LD2_Pin|LED_USR2_Pin, GPIO_PIN_RESET);
 				Change_State(IDLE);
 			}
 			else
@@ -649,13 +715,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 		HAL_TIM_Base_Stop_IT(&htim6);
 	}
-	else if(htim == &htim7){
-		Safety_Loop(); //Safety loop run every 0.5 seconds
-	}
+	/*else if(htim == &htim7){ //Used for modbus sorry!!!
+		//Safety_Loop(); //Safety loop run every 0.5 seconds
+	}*/
 	else if(htim == &htim16){ //This timer ticks every one second and is used for charge remaning calculation
 		if(currentState == DCHG || currentState == CHG){
 			// SUpply charge remaning with updated current
-			currChargeRemaining += calcdeltaAh(1, lastReadCurr / 1000.0);
+			currChargeRemaining += calcdeltaAh(1, lastReadCurr_mA / 1000.0);
 		}
 	}
 	else if(htim == &htim17){
@@ -667,13 +733,134 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 void getLatestADCValues(){
 
+	float battV_2 = 0;
+	float voltageADCVcc = 0;
 
+	//Trigger a new conversion
+	LTC2990_Trigger(&hi2c1);
+	LTC2990_WaitForConversion(&hi2c1, 100);
+
+	//Quick ADC test - Read Vcc
+	LTC2990_ReadVoltage(&hi2c1, VCC, &voltageADCVcc);
+
+	//Current reading
+	LTC2990_ReadVoltage(&hi2c1, BATTV, &lastReadBattV);
+	LTC2990_ReadVoltage(&hi2c1, BATTV_2, &battV_2);
+    LTC2990_ReadCurrent(&hi2c1, lastReadBattV, battV_2, &lastReadCurr_mA);
 }
 
 
 void updateOLED(){
 
+	//Show Vcc on OLED
+	/*char voltageADCVccString[10];
+	sprintf(voltageADCVccString, "%.3f V",voltageADCVcc);
+	ssd1306_SetCursor(15,25);
+	ssd1306_WriteString("Vcc   ", Font_7x10, White);
+	ssd1306_SetCursor(52,25);
+	ssd1306_WriteString(voltageADCVccString, Font_7x10, White);*/
 
+	//State
+	ssd1306_SetCursor(15,04);
+	ssd1306_WriteString("State  ", Font_7x10, White);
+	ssd1306_SetCursor(52,04);
+	if(currentState == IDLE){
+		ssd1306_WriteString("IDLE", Font_7x10, White);
+	} else if(currentState == CHG){
+		ssd1306_WriteString("CHG", Font_7x10, White);
+	} else if(currentState == DCHG){
+		ssd1306_WriteString("DCHG", Font_7x10, White);
+	} else {
+		ssd1306_WriteString(" ", Font_7x10, White);
+	}
+
+	//Power
+	char powerString[10];
+	sprintf(powerString, "%.2f W", lastComputedPower);
+	ssd1306_SetCursor(15,14);
+	ssd1306_WriteString("Pwr   ", Font_7x10, White);
+	ssd1306_SetCursor(52,14);
+	ssd1306_WriteString(powerString, Font_7x10, White);
+
+	//SOC
+	char socString[10];
+	sprintf(socString, "%.2f %",currentCellSOC);
+	ssd1306_SetCursor(15,25);
+	ssd1306_WriteString("SOC  ", Font_7x10, White);
+	ssd1306_SetCursor(52,25);
+	ssd1306_WriteString(socString, Font_7x10, White);
+
+
+	//Current
+	char currentString[10];
+	sprintf(currentString, "%.3f mA",lastReadCurr_mA);
+	ssd1306_SetCursor(15,37);
+	ssd1306_WriteString("Cur  ", Font_7x10, White);
+	ssd1306_SetCursor(52,37);
+	ssd1306_WriteString(currentString, Font_7x10, White);
+
+	//Voltage
+	char battVString[10];
+	sprintf(battVString, "%.3f V",lastReadBattV);
+	ssd1306_SetCursor(15,49);
+	ssd1306_WriteString("BattV   ", Font_7x10, White);
+	ssd1306_SetCursor(52,49);
+	ssd1306_WriteString(battVString, Font_7x10, White);
+
+	ssd1306_UpdateScreen();
+
+}
+
+void updateSerialPort()
+{
+	//state
+	if(currentState == IDLE){
+		HAL_UART_Transmit(&huart1, (uint8_t*)"IDLE", 4, 10);
+	} else if(currentState == CHG){
+		HAL_UART_Transmit(&huart1, (uint8_t*)"CHG", 3, 10);
+	} else if(currentState == DCHG){
+		HAL_UART_Transmit(&huart1, (uint8_t*)"DCHG", 4, 10);
+	} else {
+		HAL_UART_Transmit(&huart1, (uint8_t*)" ", 1, 10);
+	}
+
+	//Power
+	char powerString[10];
+	sprintf(powerString, "%.2f W", lastComputedPower);
+	HAL_UART_Transmit(&huart1, (uint8_t*)powerString , 10, 10);
+
+	//SOC
+	char socString[10];
+	sprintf(socString, "%.2f",currentCellSOC);
+	HAL_UART_Transmit(&huart1, (uint8_t*)socString , 10, 10);
+
+	//Current
+	char currentString[10];
+	sprintf(currentString, "%.3f mA",lastReadCurr_mA);
+	HAL_UART_Transmit(&huart1, (uint8_t*)currentString , 10, 10);
+
+	//Voltage
+	char voltageString[10];
+	sprintf(voltageString, "%.3f V",lastReadBattV);
+	HAL_UART_Transmit(&huart1, (uint8_t*)voltageString , 10, 10);
+
+}
+
+void updateModbusInputRegisters()
+{
+	/* ABCDEF */
+	usRegInputBuf[0] = currentState;
+	char powerString[10];
+	memset(powerString, 0, 10);
+	sprintf(powerString, "%.2f W ", lastComputedPower);
+	usRegInputBuf[1] = powerString[1] << 8  | powerString[0];
+	usRegInputBuf[2] = powerString[3] << 8  | powerString[2];
+	usRegInputBuf[3] = powerString[5] << 8  | powerString[4];
+	usRegInputBuf[4] = powerString[7] << 8  | powerString[6];
+	usRegInputBuf[5] = powerString[9] << 8  | powerString[8];
+	usRegInputBuf[6] = (USHORT)lastReadCurr_mA << 16;
+	usRegInputBuf[7] = (USHORT)lastReadBattV;
+	usRegInputBuf[8] = (USHORT)lastReadBattV << 16;
 }
 
 void calcSOC(float ocv_V, float chargeRemain_Ah){
@@ -686,7 +873,6 @@ void calcSOC(float ocv_V, float chargeRemain_Ah){
 		//If cell is polarized
 		currentCellSOC = (currChargeRemaining/fullChargeCapacity) * 100;
 	}
-
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
@@ -766,7 +952,7 @@ void Safety_Loop()
 	if(lastReadBattV < 2.8)
 	{
 		//Stop charging, stop discharging
-		Change_State(IDLE);
+		//Change_State(IDLE);
 	}
 
 	//Overvoltage
@@ -774,6 +960,94 @@ void Safety_Loop()
 	//Overtemperature
 
 	//Overcurrent
+}
+
+//16 bit input register data type
+//NOTE: "mbpoll -m rtu -a 10 -r 1000 -c 8 -t 3 -b 38400 -d 8 -P NONE /dev/ttyUSB0"
+eMBErrorCode
+eMBRegInputCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNRegs )
+{
+    eMBErrorCode    eStatus = MB_ENOERR;
+    int             iRegIndex;
+
+    if( ( usAddress >= REG_INPUT_START )
+        && ( usAddress + usNRegs <= REG_INPUT_START + REG_INPUT_NREGS ) )
+    {
+        iRegIndex = ( int )( usAddress - usRegInputStart );
+        while( usNRegs > 0 )
+        {
+            *pucRegBuffer++ =
+                ( unsigned char )( usRegInputBuf[iRegIndex] >> 8 );
+            *pucRegBuffer++ =
+                ( unsigned char )( usRegInputBuf[iRegIndex] & 0xFF );
+            iRegIndex++;
+            usNRegs--;
+        }
+    }
+    else
+    {
+        eStatus = MB_ENOREG;
+    }
+
+    return eStatus;
+}
+
+//mbpoll -m rtu -a 10 -r 2000 -t 4 -b 38400 -d 8 -P NONE /dev/ttyUSB0 4 5 6
+eMBErrorCode
+eMBRegHoldingCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNRegs,
+                 eMBRegisterMode eMode )
+{
+    eMBErrorCode    eStatus = MB_ENOERR;
+    int             iRegIndex;
+
+    if( ( usAddress >= REG_HOLDING_START ) &&
+        ( usAddress + usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS ) )
+    {
+        iRegIndex = ( int )( usAddress - usRegHoldingStart );
+        switch ( eMode )
+        {
+            /* Pass current register values to the protocol stack. */
+        case MB_REG_READ:
+            while( usNRegs > 0 )
+            {
+                *pucRegBuffer++ = ( UCHAR ) ( usRegHoldingBuf[iRegIndex] >> 8 );
+                *pucRegBuffer++ = ( UCHAR ) ( usRegHoldingBuf[iRegIndex] & 0xFF );
+                iRegIndex++;
+                usNRegs--;
+            }
+            break;
+
+            /* Update current register values with new values from the
+             * protocol stack. */
+        case MB_REG_WRITE:
+            while( usNRegs > 0 )
+            {
+                usRegHoldingBuf[iRegIndex] = *pucRegBuffer++ << 8;
+                usRegHoldingBuf[iRegIndex] |= *pucRegBuffer++;
+                iRegIndex++;
+                usNRegs--;
+            }
+        }
+    }
+    else
+    {
+        eStatus = MB_ENOREG;
+    }
+    return eStatus;
+}
+
+
+eMBErrorCode
+eMBRegCoilsCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNCoils,
+               eMBRegisterMode eMode )
+{
+    return MB_ENOREG;
+}
+
+eMBErrorCode
+eMBRegDiscreteCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNDiscrete )
+{
+    return MB_ENOREG;
 }
 
 /* USER CODE END 4 */

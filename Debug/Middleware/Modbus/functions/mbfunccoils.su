@@ -1,0 +1,3 @@
+mbfunccoils.c:68:1:eMBFuncReadCoils	16	static
+mbfunccoils.c:147:1:eMBFuncWriteCoil	16	static
+mbfunccoils.c:201:1:eMBFuncWriteMultipleCoils	8	static

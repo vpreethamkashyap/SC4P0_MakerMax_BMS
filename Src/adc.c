@@ -208,7 +208,7 @@ HAL_StatusTypeDef LTC2990_ReadV2(I2C_HandleTypeDef *hi2c, float* V2_V) {
 
 	//Convert register contents to V4
 	V2_regData = ((V2ReadBuffer[0] << 8) | V2ReadBuffer[1]) & ~0xC000; //D[13:0]
-	*V2_V = ((V2_regData * 305.18) / 1000000);
+	*V2_V = (((V2_regData * 305.18) / 1000000)* vdividerFactor);
 
 	return retStatus;
 }
@@ -308,7 +308,7 @@ HAL_StatusTypeDef LTC2990_ReadVoltage(I2C_HandleTypeDef *hi2c, ADC_CHANNEL ch, f
 	else if(ch == BATTV_2)
 	{
 		//Vbatt2
-		retStatus = LTC2990_ReadV4(hi2c, voltage_value);
+		retStatus = LTC2990_ReadV2(hi2c, voltage_value);
 	}
 	else
 	{
@@ -316,4 +316,6 @@ HAL_StatusTypeDef LTC2990_ReadVoltage(I2C_HandleTypeDef *hi2c, ADC_CHANNEL ch, f
 		*voltage_value = 0;
 		retStatus = HAL_OK;
 	}
+
+	return retStatus;
 }
