@@ -40,6 +40,7 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "cmsis_os.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -54,21 +55,6 @@
 #include "mbport.h"
 
 /* USER CODE END Includes */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-
-#define REG_INPUT_START 1000
-#define REG_INPUT_NREGS 9
-#define REG_HOLDING_START 2000
-#define REG_HOLDING_NREGS 8
-
-static USHORT usRegInputStart = REG_INPUT_START;
-static USHORT usRegInputBuf[REG_INPUT_NREGS];
-static USHORT usRegHoldingStart = REG_HOLDING_START;
-static USHORT usRegHoldingBuf[REG_HOLDING_NREGS];
-
-/* USER CODE END 0 */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -98,6 +84,9 @@ TIM_HandleTypeDef htim17;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
+osThreadId defaultTaskHandle;
+uint32_t defaultTaskBuffer[ 1024 ];
+osStaticThreadDef_t defaultTaskControlBlock;
 /* USER CODE BEGIN PV */
 
 typedef enum
@@ -122,6 +111,11 @@ static float currChargeRemaining = 0; //Ah how much charge is remaining inside t
 static const float fullChargeCapacity = 3.0; //Ah //TODO: change this as per your cell
 static float lastComputedPower = 0;
 
+char powerString[10];
+char socString[10];
+char currentString[10];
+char battVString[10];
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -135,6 +129,8 @@ static void MX_TIM7_Init(void);
 static void MX_TIM16_Init(void);
 static void MX_TIM17_Init(void);
 static void MX_USART1_UART_Init(void);
+void StartDefaultTask(void const * argument);
+
 /* USER CODE BEGIN PFP */
 void Charging_Enable(CHG_EN chg_en);
 void Change_State(STATE new_state);
@@ -148,31 +144,18 @@ void calcSOC(float ocv_V, float chargeRemain_Ah);
 
 /* USER CODE END PFP */
 
-/* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_DAC1_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_TIM6_Init(void);
-static void MX_USART2_UART_Init(void);
-static void MX_TIM7_Init(void);
-static void MX_TIM16_Init(void);
-static void MX_TIM17_Init(void);
-static void MX_USART1_UART_Init(void);
-/* USER CODE BEGIN PFP */
-void Charging_Enable(CHG_EN chg_en);
-void Change_State(STATE new_state);
-void Discharging_Set(uint8_t pct);
-void Safety_Loop();
-void getLatestADCValues();
-void updateOLED();
-void updateSerialPort();
-void calcSOC(float ocv_V, float chargeRemain_Ah);
-
-/* USER CODE END PFP */
-
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+#define REG_INPUT_START 1000
+#define REG_INPUT_NREGS 9
+#define REG_HOLDING_START 2000
+#define REG_HOLDING_NREGS 8
+
+static USHORT usRegInputStart = REG_INPUT_START;
+static USHORT usRegInputBuf[REG_INPUT_NREGS];
+static USHORT usRegHoldingStart = REG_HOLDING_START;
+static USHORT usRegHoldingBuf[REG_HOLDING_NREGS];
 
 /* USER CODE END 0 */
 
@@ -247,8 +230,36 @@ int main(void)
   eStatus = eMBEnable();
 
   /* USER CODE END 2 */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* definition and creation of defaultTask */
+  osThreadStaticDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1024, defaultTaskBuffer, &defaultTaskControlBlock);
+  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* Start scheduler */
+  osKernelStart();
  
- 
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -257,16 +268,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	 getLatestADCValues();
-	 calcSOC(lastReadBattV, currChargeRemaining);
-	 lastComputedPower = computePower(lastReadBattV);
-	 updateOLED();
-	 updateModbusInputRegisters();
-	 //updateSerialPort();
-	 //HAL_Delay(1000); //Update rate to 1s
-
-	 //Modbus Poll routine
-	 eMBPoll();
+//	 getLatestADCValues();
+//	 calcSOC(lastReadBattV, currChargeRemaining);
+//	 lastComputedPower = computePower(lastReadBattV);
+//	 updateOLED();
+//	 updateModbusInputRegisters();
+//	 //updateSerialPort();
+//	 //HAL_Delay(1000); //Update rate to 1s
+//
+//	 //Modbus Poll routine
+//	 eMBPoll();
   }
   /* USER CODE END 3 */
 }
@@ -665,7 +676,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
-  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(EXTI9_5_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
 
 }
@@ -775,16 +786,14 @@ void updateOLED(){
 	}
 
 	//Power
-	char powerString[10];
-	sprintf(powerString, "%.2f W", lastComputedPower);
+	sprintf(powerString, "%.2d W", (int)lastComputedPower);
 	ssd1306_SetCursor(15,14);
 	ssd1306_WriteString("Pwr   ", Font_7x10, White);
 	ssd1306_SetCursor(52,14);
 	ssd1306_WriteString(powerString, Font_7x10, White);
 
 	//SOC
-	char socString[10];
-	sprintf(socString, "%.2f %",currentCellSOC);
+	sprintf(socString, "%.2d %", (int)currentCellSOC);
 	ssd1306_SetCursor(15,25);
 	ssd1306_WriteString("SOC  ", Font_7x10, White);
 	ssd1306_SetCursor(52,25);
@@ -792,16 +801,14 @@ void updateOLED(){
 
 
 	//Current
-	char currentString[10];
-	sprintf(currentString, "%.3f mA",lastReadCurr_mA);
+	sprintf(currentString, "%.3d mA",(int)lastReadCurr_mA);
 	ssd1306_SetCursor(15,37);
 	ssd1306_WriteString("Cur  ", Font_7x10, White);
 	ssd1306_SetCursor(52,37);
 	ssd1306_WriteString(currentString, Font_7x10, White);
 
 	//Voltage
-	char battVString[10];
-	sprintf(battVString, "%.3f V",lastReadBattV);
+	sprintf(battVString, "%.3d V", (int)lastReadBattV);
 	ssd1306_SetCursor(15,49);
 	ssd1306_WriteString("BattV   ", Font_7x10, White);
 	ssd1306_SetCursor(52,49);
@@ -852,7 +859,7 @@ void updateModbusInputRegisters()
 	usRegInputBuf[0] = currentState;
 	char powerString[10];
 	memset(powerString, 0, 10);
-	sprintf(powerString, "%.2f W ", lastComputedPower);
+	sprintf(powerString, "%.2d W ", (int)lastComputedPower);
 	usRegInputBuf[1] = powerString[1] << 8  | powerString[0];
 	usRegInputBuf[2] = powerString[3] << 8  | powerString[2];
 	usRegInputBuf[3] = powerString[5] << 8  | powerString[4];
@@ -1051,6 +1058,33 @@ eMBRegDiscreteCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNDiscrete )
 }
 
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used 
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void const * argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+	  getLatestADCValues();
+	  calcSOC(lastReadBattV, currChargeRemaining);
+	  lastComputedPower = computePower(lastReadBattV);
+	  updateOLED();
+	  updateModbusInputRegisters();
+	  //updateSerialPort();
+	  //HAL_Delay(1000); //Update rate to 1s
+	  //Modbus Poll routine
+	  eMBPoll();
+    osDelay(1);
+  }
+  /* USER CODE END 5 */ 
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
