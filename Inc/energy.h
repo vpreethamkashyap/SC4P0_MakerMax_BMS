@@ -1,14 +1,14 @@
 #ifndef ENERGY_H_
 #define ENERGY_H_
 
-static float simulatedAhStep = 0.1;
-static float fullCellAh = 3;
-static float simulatedSOC = 0;
-static float energyAvailableDischarge = 0;
-static float undervoltage = 2.8;
+static float simulatedAhStep = 0.1;		//Ah
+static float fullCellAh = 3;			//Ah
+static float simulatedSOC = 0;			//V
+static float energyAvailableDischarge = 0; //Wh
+static float undervoltage = 2.8;		//V
 
-int performDischargeStep (float startBatt_mV);
-void setupEnergyAvailableDischarge(float lastReadBattV);
+int performDischargeStep (float currentSOC);
+void setupEnergyAvailableDischarge(float soc);
 int calculateEnergyAvailableDischarge();
 float getEnergyAvaialbelDischarge();
 

@@ -44,6 +44,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+//#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include "oled.h"
@@ -53,6 +54,7 @@
 #include "power.h"
 #include "mb.h"
 #include "mbport.h"
+#include "energy.h"
 
 /* USER CODE END Includes */
 
@@ -110,11 +112,42 @@ static float currentCellSOC = 0;
 static float currChargeRemaining = 0; //Ah how much charge is remaining inside the cell
 static const float fullChargeCapacity = 3.0; //Ah //TODO: change this as per your cell
 static float lastComputedPower = 0;
+static float lastComputedEnergy = 0;	//Wh
 
 char powerString[10];
 char socString[10];
 char currentString[10];
 char battVString[10];
+
+union
+{
+  float     asFloat;
+  uint32_t  asUInt32;
+}powerData;
+
+union
+{
+  float     asFloat;
+  uint32_t  asUInt32;
+}socData;
+
+union
+{
+  float     asFloat;
+  uint32_t  asUInt32;
+}battVData;
+
+union
+{
+  float     asFloat;
+  uint32_t  asUInt32;
+}currentData;
+
+union
+{
+  float     asFloat;
+  uint32_t  asUInt32;
+}energyData;
 
 /* USER CODE END PV */
 
@@ -141,6 +174,8 @@ void updateOLED();
 void updateSerialPort();
 void updateModbusInputRegisters();
 void calcSOC(float ocv_V, float chargeRemain_Ah);
+int sprintf(char *out, const char *format, ...);
+
 
 /* USER CODE END PFP */
 
@@ -148,7 +183,7 @@ void calcSOC(float ocv_V, float chargeRemain_Ah);
 /* USER CODE BEGIN 0 */
 
 #define REG_INPUT_START 1000
-#define REG_INPUT_NREGS 9
+#define REG_INPUT_NREGS 64
 #define REG_HOLDING_START 2000
 #define REG_HOLDING_NREGS 8
 
@@ -203,9 +238,9 @@ int main(void)
   ssd1306_Init();
 
   ssd1306_Fill(Black);
-  //ssd1306_SetCursor(10,30);
-  //ssd1306_WriteString("MakerMax", Font_11x18, White);
-  //ssd1306_UpdateScreen();
+  ssd1306_SetCursor(15,04);
+  ssd1306_WriteString("BMS", Font_16x26, White);
+  ssd1306_UpdateScreen();
 
   //Initial ADC
   LTC2990_ConfigureControlReg(&hi2c1);
@@ -625,7 +660,6 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
@@ -763,14 +797,6 @@ void getLatestADCValues(){
 
 void updateOLED(){
 
-	//Show Vcc on OLED
-	/*char voltageADCVccString[10];
-	sprintf(voltageADCVccString, "%.3f V",voltageADCVcc);
-	ssd1306_SetCursor(15,25);
-	ssd1306_WriteString("Vcc   ", Font_7x10, White);
-	ssd1306_SetCursor(52,25);
-	ssd1306_WriteString(voltageADCVccString, Font_7x10, White);*/
-
 	//State
 	ssd1306_SetCursor(15,04);
 	ssd1306_WriteString("State  ", Font_7x10, White);
@@ -793,7 +819,7 @@ void updateOLED(){
 	ssd1306_WriteString(powerString, Font_7x10, White);
 
 	//SOC
-	sprintf(socString, "%.2d %", (int)currentCellSOC);
+	sprintf(socString, "%.2d ", (int)currentCellSOC);
 	ssd1306_SetCursor(15,25);
 	ssd1306_WriteString("SOC  ", Font_7x10, White);
 	ssd1306_SetCursor(52,25);
@@ -801,7 +827,7 @@ void updateOLED(){
 
 
 	//Current
-	sprintf(currentString, "%.3d mA",(int)lastReadCurr_mA);
+	sprintf(currentString, "%.3d mA", (int)lastReadCurr_mA);
 	ssd1306_SetCursor(15,37);
 	ssd1306_WriteString("Cur  ", Font_7x10, White);
 	ssd1306_SetCursor(52,37);
@@ -833,22 +859,22 @@ void updateSerialPort()
 
 	//Power
 	char powerString[10];
-	sprintf(powerString, "%.2f W", lastComputedPower);
+	sprintf(powerString, "%.2d W", (int)lastComputedPower);
 	HAL_UART_Transmit(&huart1, (uint8_t*)powerString , 10, 10);
 
 	//SOC
 	char socString[10];
-	sprintf(socString, "%.2f",currentCellSOC);
+	sprintf(socString, "%.2d",(int)currentCellSOC);
 	HAL_UART_Transmit(&huart1, (uint8_t*)socString , 10, 10);
 
 	//Current
 	char currentString[10];
-	sprintf(currentString, "%.3f mA",lastReadCurr_mA);
+	sprintf(currentString, "%.3d mA", (int)lastReadCurr_mA);
 	HAL_UART_Transmit(&huart1, (uint8_t*)currentString , 10, 10);
 
 	//Voltage
 	char voltageString[10];
-	sprintf(voltageString, "%.3f V",lastReadBattV);
+	sprintf(voltageString, "%.3d V", (int)lastReadBattV);
 	HAL_UART_Transmit(&huart1, (uint8_t*)voltageString , 10, 10);
 
 }
@@ -856,21 +882,26 @@ void updateSerialPort()
 void updateModbusInputRegisters()
 {
 	/* ABCDEF */
+	powerData.asFloat = lastComputedPower;
+	socData.asFloat = currentCellSOC;
+	currentData.asFloat = lastReadCurr_mA;
+	battVData.asFloat = lastReadBattV;
+	energyData.asFloat = lastComputedEnergy;
+
 	usRegInputBuf[0] = currentState;
-	char powerString[10];
-	memset(powerString, 0, 10);
-	sprintf(powerString, "%.2d W ", (int)lastComputedPower);
-	usRegInputBuf[1] = powerString[1] << 8  | powerString[0];
-	usRegInputBuf[2] = powerString[3] << 8  | powerString[2];
-	usRegInputBuf[3] = powerString[5] << 8  | powerString[4];
-	usRegInputBuf[4] = powerString[7] << 8  | powerString[6];
-	usRegInputBuf[5] = powerString[9] << 8  | powerString[8];
-	usRegInputBuf[6] = (USHORT)lastReadCurr_mA << 16;
-	usRegInputBuf[7] = (USHORT)lastReadBattV;
-	usRegInputBuf[8] = (USHORT)lastReadBattV << 16;
+	usRegInputBuf[1] = powerData.asUInt32 >> 16;
+	usRegInputBuf[2] = powerData.asUInt32;
+	usRegInputBuf[3] = socData.asUInt32 >> 16;
+	usRegInputBuf[4] = socData.asUInt32;
+	usRegInputBuf[5] = currentData.asUInt32 >> 16;
+	usRegInputBuf[6] = currentData.asUInt32;
+	usRegInputBuf[7] = battVData.asUInt32 >> 16;
+	usRegInputBuf[8] = battVData.asUInt32;
+	usRegInputBuf[9] = energyData.asUInt32 >> 16;
+	usRegInputBuf[10] = energyData.asUInt32;
 }
 
-void calcSOC(float ocv_V, float chargeRemain_Ah){
+void calcSOC(float ocv_V, float charrgeRemain_Ah){
 	//Simple switch to start with
 	if(currentState == IDLE){
 		//If cell is not polarized.
@@ -1075,7 +1106,13 @@ void StartDefaultTask(void const * argument)
 	  getLatestADCValues();
 	  calcSOC(lastReadBattV, currChargeRemaining);
 	  lastComputedPower = computePower(lastReadBattV);
-	  updateOLED();
+
+	  setupEnergyAvailableDischarge(currentCellSOC);
+
+	  if(calculateEnergyAvailableDischarge() == 1)
+		  lastComputedEnergy = getEnergyAvaialbelDischarge();
+
+	  //updateOLED();
 	  updateModbusInputRegisters();
 	  //updateSerialPort();
 	  //HAL_Delay(1000); //Update rate to 1s

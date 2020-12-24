@@ -1,0 +1,4 @@
+energy.c:11:5:performDischargeStep	8	static
+energy.c:32:6:setupEnergyAvailableDischarge	0	static
+energy.c:40:5:calculateEnergyAvailableDischarge	8	static
+energy.c:51:7:getEnergyAvaialbelDischarge	0	static
