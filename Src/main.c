@@ -52,9 +52,9 @@
 #include "soc.h"
 #include "sochelper.h"
 #include "power.h"
-#include "mb.h"
-#include "mbport.h"
 #include "energy.h"
+#include "modbus_helper.h"
+
 
 /* USER CODE END Includes */
 
@@ -106,48 +106,19 @@ typedef enum
 
 STATE currentState = IDLE;
 uint8_t currentDchgPct = 0;
-static float lastReadBattV = 0;
-static float lastReadCurr_mA = 0;
-static float currentCellSOC = 0;
-static float currChargeRemaining = 0; //Ah how much charge is remaining inside the cell
+
+float lastReadBattV = 0;
+float lastReadCurr_mA = 0;
+float currentCellSOC = 0;
+float currChargeRemaining = 0; //Ah how much charge is remaining inside the cell
+float lastComputedPower = 0;
+float lastComputedEnergy = 0;	//Wh
 static const float fullChargeCapacity = 3.0; //Ah //TODO: change this as per your cell
-static float lastComputedPower = 0;
-static float lastComputedEnergy = 0;	//Wh
 
 char powerString[10];
 char socString[10];
 char currentString[10];
 char battVString[10];
-
-union
-{
-  float     asFloat;
-  uint32_t  asUInt32;
-}powerData;
-
-union
-{
-  float     asFloat;
-  uint32_t  asUInt32;
-}socData;
-
-union
-{
-  float     asFloat;
-  uint32_t  asUInt32;
-}battVData;
-
-union
-{
-  float     asFloat;
-  uint32_t  asUInt32;
-}currentData;
-
-union
-{
-  float     asFloat;
-  uint32_t  asUInt32;
-}energyData;
 
 /* USER CODE END PV */
 
@@ -172,7 +143,6 @@ void Safety_Loop();
 void getLatestADCValues();
 void updateOLED();
 void updateSerialPort();
-void updateModbusInputRegisters();
 void calcSOC(float ocv_V, float chargeRemain_Ah);
 int sprintf(char *out, const char *format, ...);
 
@@ -181,16 +151,6 @@ int sprintf(char *out, const char *format, ...);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-#define REG_INPUT_START 1000
-#define REG_INPUT_NREGS 64
-#define REG_HOLDING_START 2000
-#define REG_HOLDING_NREGS 8
-
-static USHORT usRegInputStart = REG_INPUT_START;
-static USHORT usRegInputBuf[REG_INPUT_NREGS];
-static USHORT usRegHoldingStart = REG_HOLDING_START;
-static USHORT usRegHoldingBuf[REG_HOLDING_NREGS];
 
 /* USER CODE END 0 */
 
@@ -201,7 +161,6 @@ static USHORT usRegHoldingBuf[REG_HOLDING_NREGS];
 int main(void)
 {
   /* USER CODE BEGIN 1 */
-	eMBErrorCode    eStatus;
 
   /* USER CODE END 1 */
   
@@ -238,7 +197,7 @@ int main(void)
   ssd1306_Init();
 
   ssd1306_Fill(Black);
-  ssd1306_SetCursor(15,04);
+  ssd1306_SetCursor(20,04);
   ssd1306_WriteString("BMS", Font_16x26, White);
   ssd1306_UpdateScreen();
 
@@ -249,20 +208,7 @@ int main(void)
   //HAL_TIM_Base_Start_IT(&htim7);
   HAL_TIM_Base_Start_IT(&htim16);
 
-  /* ABCDEF */
-  usRegInputBuf[0] = 11;
-  usRegInputBuf[1] = 22;
-  usRegInputBuf[2] = 33;
-  usRegInputBuf[3] = 44;
-  usRegInputBuf[4] = 55;
-  usRegInputBuf[5] = 66;
-  usRegInputBuf[6] = 77;
-  usRegInputBuf[7] = 88;
-
-  eStatus = eMBInit( MB_RTU, 0x0A, 0, 38400, MB_PAR_NONE );
-
-  /* Enable the Modbus Protocol Stack. */
-  eStatus = eMBEnable();
+  enable_modbusrtu();
 
   /* USER CODE END 2 */
 
@@ -289,6 +235,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
+  modbus_task_init();
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -303,16 +250,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//	 getLatestADCValues();
-//	 calcSOC(lastReadBattV, currChargeRemaining);
-//	 lastComputedPower = computePower(lastReadBattV);
-//	 updateOLED();
-//	 updateModbusInputRegisters();
-//	 //updateSerialPort();
-//	 //HAL_Delay(1000); //Update rate to 1s
-//
-//	 //Modbus Poll routine
-//	 eMBPoll();
   }
   /* USER CODE END 3 */
 }
@@ -879,28 +816,6 @@ void updateSerialPort()
 
 }
 
-void updateModbusInputRegisters()
-{
-	/* ABCDEF */
-	powerData.asFloat = lastComputedPower;
-	socData.asFloat = currentCellSOC;
-	currentData.asFloat = lastReadCurr_mA;
-	battVData.asFloat = lastReadBattV;
-	energyData.asFloat = lastComputedEnergy;
-
-	usRegInputBuf[0] = currentState;
-	usRegInputBuf[1] = powerData.asUInt32 >> 16;
-	usRegInputBuf[2] = powerData.asUInt32;
-	usRegInputBuf[3] = socData.asUInt32 >> 16;
-	usRegInputBuf[4] = socData.asUInt32;
-	usRegInputBuf[5] = currentData.asUInt32 >> 16;
-	usRegInputBuf[6] = currentData.asUInt32;
-	usRegInputBuf[7] = battVData.asUInt32 >> 16;
-	usRegInputBuf[8] = battVData.asUInt32;
-	usRegInputBuf[9] = energyData.asUInt32 >> 16;
-	usRegInputBuf[10] = energyData.asUInt32;
-}
-
 void calcSOC(float ocv_V, float charrgeRemain_Ah){
 	//Simple switch to start with
 	if(currentState == IDLE){
@@ -1000,94 +915,6 @@ void Safety_Loop()
 	//Overcurrent
 }
 
-//16 bit input register data type
-//NOTE: "mbpoll -m rtu -a 10 -r 1000 -c 8 -t 3 -b 38400 -d 8 -P NONE /dev/ttyUSB0"
-eMBErrorCode
-eMBRegInputCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNRegs )
-{
-    eMBErrorCode    eStatus = MB_ENOERR;
-    int             iRegIndex;
-
-    if( ( usAddress >= REG_INPUT_START )
-        && ( usAddress + usNRegs <= REG_INPUT_START + REG_INPUT_NREGS ) )
-    {
-        iRegIndex = ( int )( usAddress - usRegInputStart );
-        while( usNRegs > 0 )
-        {
-            *pucRegBuffer++ =
-                ( unsigned char )( usRegInputBuf[iRegIndex] >> 8 );
-            *pucRegBuffer++ =
-                ( unsigned char )( usRegInputBuf[iRegIndex] & 0xFF );
-            iRegIndex++;
-            usNRegs--;
-        }
-    }
-    else
-    {
-        eStatus = MB_ENOREG;
-    }
-
-    return eStatus;
-}
-
-//mbpoll -m rtu -a 10 -r 2000 -t 4 -b 38400 -d 8 -P NONE /dev/ttyUSB0 4 5 6
-eMBErrorCode
-eMBRegHoldingCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNRegs,
-                 eMBRegisterMode eMode )
-{
-    eMBErrorCode    eStatus = MB_ENOERR;
-    int             iRegIndex;
-
-    if( ( usAddress >= REG_HOLDING_START ) &&
-        ( usAddress + usNRegs <= REG_HOLDING_START + REG_HOLDING_NREGS ) )
-    {
-        iRegIndex = ( int )( usAddress - usRegHoldingStart );
-        switch ( eMode )
-        {
-            /* Pass current register values to the protocol stack. */
-        case MB_REG_READ:
-            while( usNRegs > 0 )
-            {
-                *pucRegBuffer++ = ( UCHAR ) ( usRegHoldingBuf[iRegIndex] >> 8 );
-                *pucRegBuffer++ = ( UCHAR ) ( usRegHoldingBuf[iRegIndex] & 0xFF );
-                iRegIndex++;
-                usNRegs--;
-            }
-            break;
-
-            /* Update current register values with new values from the
-             * protocol stack. */
-        case MB_REG_WRITE:
-            while( usNRegs > 0 )
-            {
-                usRegHoldingBuf[iRegIndex] = *pucRegBuffer++ << 8;
-                usRegHoldingBuf[iRegIndex] |= *pucRegBuffer++;
-                iRegIndex++;
-                usNRegs--;
-            }
-        }
-    }
-    else
-    {
-        eStatus = MB_ENOREG;
-    }
-    return eStatus;
-}
-
-
-eMBErrorCode
-eMBRegCoilsCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNCoils,
-               eMBRegisterMode eMode )
-{
-    return MB_ENOREG;
-}
-
-eMBErrorCode
-eMBRegDiscreteCB( UCHAR * pucRegBuffer, USHORT usAddress, USHORT usNDiscrete )
-{
-    return MB_ENOREG;
-}
-
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -1112,13 +939,9 @@ void StartDefaultTask(void const * argument)
 	  if(calculateEnergyAvailableDischarge() == 1)
 		  lastComputedEnergy = getEnergyAvaialbelDischarge();
 
-	  //updateOLED();
-	  updateModbusInputRegisters();
-	  //updateSerialPort();
-	  //HAL_Delay(1000); //Update rate to 1s
-	  //Modbus Poll routine
-	  eMBPoll();
-    osDelay(1);
+	  updateOLED();
+	  //osDelay(1);
+	  taskYIELD();
   }
   /* USER CODE END 5 */ 
 }
