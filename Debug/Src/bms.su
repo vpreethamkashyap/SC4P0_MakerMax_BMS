@@ -1,0 +1,13 @@
+bms.c:51:6:bms_task_init	48	static
+bms.c:77:6:InitBMS	8	static
+bms.c:159:6:getLatestADCValues	24	static
+bms.c:179:6:updateOLED	8	static
+bms.c:229:6:updateSerialPort	56	static
+bms.c:264:6:calcSOC	24	static
+bms.c:57:6:bms_task	8	static
+bms.c:277:6:HAL_GPIO_EXTI_Callback	0	static
+bms.c:287:6:Discharging_Set	16	static
+bms.c:308:6:Charging_Enable	0	static
+bms.c:320:6:Change_State	8	static
+bms.c:96:6:HAL_TIM_PeriodElapsedCallback	16	static
+bms.c:348:6:Safety_Loop	0	static

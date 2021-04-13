@@ -47,12 +47,8 @@
 //#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include "oled.h"
-#include "adc.h"
-#include "soc.h"
-#include "sochelper.h"
-#include "power.h"
-#include "energy.h"
+#include "bms.h"
+#include "can.h"
 #include "modbus_helper.h"
 
 
@@ -74,6 +70,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+CAN_HandleTypeDef hcan;
+
 DAC_HandleTypeDef hdac1;
 
 I2C_HandleTypeDef hi2c1;
@@ -91,35 +89,6 @@ uint32_t defaultTaskBuffer[ 1024 ];
 osStaticThreadDef_t defaultTaskControlBlock;
 /* USER CODE BEGIN PV */
 
-typedef enum
-{
-	CHG_ENABLE = 1,
-	CHG_DISABLE = 0
-}CHG_EN;
-
-typedef enum
-{
-	IDLE = 0,
-	CHG = 1,
-	DCHG = 2
-}STATE;
-
-STATE currentState = IDLE;
-uint8_t currentDchgPct = 0;
-
-float lastReadBattV = 0;
-float lastReadCurr_mA = 0;
-float currentCellSOC = 0;
-float currChargeRemaining = 0; //Ah how much charge is remaining inside the cell
-float lastComputedPower = 0;
-float lastComputedEnergy = 0;	//Wh
-static const float fullChargeCapacity = 3.0; //Ah //TODO: change this as per your cell
-
-char powerString[10];
-char socString[10];
-char currentString[10];
-char battVString[10];
-
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -133,19 +102,10 @@ static void MX_TIM7_Init(void);
 static void MX_TIM16_Init(void);
 static void MX_TIM17_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_CAN_Init(void);
 void StartDefaultTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
-void Charging_Enable(CHG_EN chg_en);
-void Change_State(STATE new_state);
-void Discharging_Set(uint8_t pct);
-void Safety_Loop();
-void getLatestADCValues();
-void updateOLED();
-void updateSerialPort();
-void calcSOC(float ocv_V, float chargeRemain_Ah);
-int sprintf(char *out, const char *format, ...);
-
 
 /* USER CODE END PFP */
 
@@ -191,23 +151,29 @@ int main(void)
   MX_TIM16_Init();
   MX_TIM17_Init();
   MX_USART1_UART_Init();
+  MX_CAN_Init();
   /* USER CODE BEGIN 2 */
 
-  //Initialize OLED display
-  ssd1306_Init();
+  /*
+   * Initialize TIM7 to run safety loop
+   */
 
-  ssd1306_Fill(Black);
-  ssd1306_SetCursor(20,04);
-  ssd1306_WriteString("BMS", Font_16x26, White);
-  ssd1306_UpdateScreen();
-
-  //Initial ADC
-  LTC2990_ConfigureControlReg(&hi2c1);
-
-  //Initialize TIM7 to run safety loop
   //HAL_TIM_Base_Start_IT(&htim7);
   HAL_TIM_Base_Start_IT(&htim16);
 
+  /*
+   * Initialize BMS
+   */
+  InitBMS();
+
+  /*
+   * Initialize CAN
+   */
+  InitCAN();
+
+  /*
+   * Initialize modbus
+   */
   enable_modbusrtu();
 
   /* USER CODE END 2 */
@@ -230,12 +196,16 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  osThreadStaticDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1024, defaultTaskBuffer, &defaultTaskControlBlock);
-  defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
+  //osThreadStaticDef(defaultTask, StartDefaultTask, osPriorityNormal, 0, 1024, defaultTaskBuffer, &defaultTaskControlBlock);
+  //defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
+
+  bms_task_init();
+  can_task_init();
   modbus_task_init();
+
   /* USER CODE END RTOS_THREADS */
 
   /* Start scheduler */
@@ -266,12 +236,13 @@ void SystemClock_Config(void)
 
   /** Initializes the CPU, AHB and APB busses clocks 
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL6;
   RCC_OscInitStruct.PLL.PREDIV = RCC_PREDIV_DIV1;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -286,7 +257,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -302,6 +273,43 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief CAN Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN_Init(void)
+{
+
+  /* USER CODE BEGIN CAN_Init 0 */
+
+  /* USER CODE END CAN_Init 0 */
+
+  /* USER CODE BEGIN CAN_Init 1 */
+
+  /* USER CODE END CAN_Init 1 */
+  hcan.Instance = CAN;
+  hcan.Init.Prescaler = 12;
+  hcan.Init.Mode = CAN_MODE_NORMAL;
+  hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_13TQ;
+  hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan.Init.TimeTriggeredMode = DISABLE;
+  hcan.Init.AutoBusOff = DISABLE;
+  hcan.Init.AutoWakeUp = DISABLE;
+  hcan.Init.AutoRetransmission = ENABLE;
+  hcan.Init.ReceiveFifoLocked = DISABLE;
+  hcan.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN_Init 2 */
+
+  /* USER CODE END CAN_Init 2 */
+
 }
 
 /**
@@ -597,6 +605,7 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
 }
 
 /**
@@ -622,7 +631,7 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
@@ -653,267 +662,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-	if(htim == &htim6){
-		HAL_GPIO_TogglePin(LED_USR1_GPIO_Port, LED_USR1_Pin); //LED1 toggles every 0.5 seconds
-
-		//If both buttons S1 and S1 pressed
-		if(HAL_GPIO_ReadPin(GPIOA, S1_INTERRUPT_Pin) == GPIO_PIN_RESET && HAL_GPIO_ReadPin(GPIOA, S2_INTERRUPT_Pin) == GPIO_PIN_RESET)
-		{
-			if(currentState == IDLE)
-			{
-				HAL_GPIO_WritePin(GPIOA, LD2_Pin|LED_USR2_Pin, GPIO_PIN_SET);
-				Change_State(CHG);
-			}
-			else if(currentState == CHG)
-			{
-				HAL_GPIO_WritePin(GPIOA, LD2_Pin|LED_USR2_Pin, GPIO_PIN_SET);
-				Change_State(DCHG);
-			}
-			else if(currentState == DCHG)
-			{
-				HAL_GPIO_WritePin(GPIOA, LD2_Pin|LED_USR2_Pin, GPIO_PIN_RESET);
-				Change_State(IDLE);
-			}
-			else
-			{//This should not trigger
-				Change_State(IDLE);
-			}
-		}
-		//If either S2 or S1 is pressed while in DCHG state, then change discharge current
-		else if(currentState == DCHG && HAL_GPIO_ReadPin(GPIOA, S1_INTERRUPT_Pin) == GPIO_PIN_RESET)
-		{
-			uint8_t newDchgPct = currentDchgPct + 10;
-			//Increase discharge current
-			Discharging_Set(newDchgPct);
-		}
-		else if(currentState == DCHG && HAL_GPIO_ReadPin(GPIOA, S2_INTERRUPT_Pin) == GPIO_PIN_RESET)
-		{
-			uint8_t newDchgPct = currentDchgPct - 10;
-			//Decrease discharge current
-			Discharging_Set(newDchgPct);
-		}
-
-		HAL_TIM_Base_Stop_IT(&htim6);
-	}
-	/*else if(htim == &htim7){ //Used for modbus sorry!!!
-		//Safety_Loop(); //Safety loop run every 0.5 seconds
-	}*/
-	else if(htim == &htim16){ //This timer ticks every one second and is used for charge remaning calculation
-		if(currentState == DCHG || currentState == CHG){
-			// SUpply charge remaning with updated current
-			currChargeRemaining += calcdeltaAh(1, lastReadCurr_mA / 1000.0);
-		}
-	}
-	else if(htim == &htim17){
-		// This timer ticks every 10 seconds and is used for polarization calculations
-		//If state is idle
-		//Start counting rest time
-	}
-}
-
-void getLatestADCValues(){
-
-	float battV_2 = 0;
-	float voltageADCVcc = 0;
-
-	//Trigger a new conversion
-	LTC2990_Trigger(&hi2c1);
-	LTC2990_WaitForConversion(&hi2c1, 100);
-
-	//Quick ADC test - Read Vcc
-	LTC2990_ReadVoltage(&hi2c1, VCC, &voltageADCVcc);
-
-	//Current reading
-	LTC2990_ReadVoltage(&hi2c1, BATTV, &lastReadBattV);
-	LTC2990_ReadVoltage(&hi2c1, BATTV_2, &battV_2);
-    LTC2990_ReadCurrent(&hi2c1, lastReadBattV, battV_2, &lastReadCurr_mA);
-}
-
-
-void updateOLED(){
-
-	//State
-	ssd1306_SetCursor(15,04);
-	ssd1306_WriteString("State  ", Font_7x10, White);
-	ssd1306_SetCursor(52,04);
-	if(currentState == IDLE){
-		ssd1306_WriteString("IDLE", Font_7x10, White);
-	} else if(currentState == CHG){
-		ssd1306_WriteString("CHG", Font_7x10, White);
-	} else if(currentState == DCHG){
-		ssd1306_WriteString("DCHG", Font_7x10, White);
-	} else {
-		ssd1306_WriteString(" ", Font_7x10, White);
-	}
-
-	//Power
-	sprintf(powerString, "%.2d W", (int)lastComputedPower);
-	ssd1306_SetCursor(15,14);
-	ssd1306_WriteString("Pwr   ", Font_7x10, White);
-	ssd1306_SetCursor(52,14);
-	ssd1306_WriteString(powerString, Font_7x10, White);
-
-	//SOC
-	sprintf(socString, "%.2d ", (int)currentCellSOC);
-	ssd1306_SetCursor(15,25);
-	ssd1306_WriteString("SOC  ", Font_7x10, White);
-	ssd1306_SetCursor(52,25);
-	ssd1306_WriteString(socString, Font_7x10, White);
-
-
-	//Current
-	sprintf(currentString, "%.3d mA", (int)lastReadCurr_mA);
-	ssd1306_SetCursor(15,37);
-	ssd1306_WriteString("Cur  ", Font_7x10, White);
-	ssd1306_SetCursor(52,37);
-	ssd1306_WriteString(currentString, Font_7x10, White);
-
-	//Voltage
-	sprintf(battVString, "%.3d V", (int)lastReadBattV);
-	ssd1306_SetCursor(15,49);
-	ssd1306_WriteString("BattV   ", Font_7x10, White);
-	ssd1306_SetCursor(52,49);
-	ssd1306_WriteString(battVString, Font_7x10, White);
-
-	ssd1306_UpdateScreen();
-
-}
-
-void updateSerialPort()
-{
-	//state
-	if(currentState == IDLE){
-		HAL_UART_Transmit(&huart1, (uint8_t*)"IDLE", 4, 10);
-	} else if(currentState == CHG){
-		HAL_UART_Transmit(&huart1, (uint8_t*)"CHG", 3, 10);
-	} else if(currentState == DCHG){
-		HAL_UART_Transmit(&huart1, (uint8_t*)"DCHG", 4, 10);
-	} else {
-		HAL_UART_Transmit(&huart1, (uint8_t*)" ", 1, 10);
-	}
-
-	//Power
-	char powerString[10];
-	sprintf(powerString, "%.2d W", (int)lastComputedPower);
-	HAL_UART_Transmit(&huart1, (uint8_t*)powerString , 10, 10);
-
-	//SOC
-	char socString[10];
-	sprintf(socString, "%.2d",(int)currentCellSOC);
-	HAL_UART_Transmit(&huart1, (uint8_t*)socString , 10, 10);
-
-	//Current
-	char currentString[10];
-	sprintf(currentString, "%.3d mA", (int)lastReadCurr_mA);
-	HAL_UART_Transmit(&huart1, (uint8_t*)currentString , 10, 10);
-
-	//Voltage
-	char voltageString[10];
-	sprintf(voltageString, "%.3d V", (int)lastReadBattV);
-	HAL_UART_Transmit(&huart1, (uint8_t*)voltageString , 10, 10);
-
-}
-
-void calcSOC(float ocv_V, float charrgeRemain_Ah){
-	//Simple switch to start with
-	if(currentState == IDLE){
-		//If cell is not polarized.
-		currentCellSOC = socByOCV(ocv_V);
-		currChargeRemaining = (currentCellSOC / 100) * fullChargeCapacity;
-	} else {
-		//If cell is polarized
-		currentCellSOC = (currChargeRemaining/fullChargeCapacity) * 100;
-	}
-}
-
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-	if(GPIO_Pin == S2_INTERRUPT_Pin || GPIO_Pin == S1_INTERRUPT_Pin)
-	{
-		//S2 has been pressed, start software debouncing
-		HAL_TIM_Base_Start_IT(&htim6);
-	}
-}
-
-//Where pct should be 0 - 100
-void Discharging_Set(uint8_t pct)
-{
-	if(pct < 0)
-	{
-		pct = 0;
-	}
-	else if (pct > 100)
-	{
-		pct = 100;
-	}
-	//DAC is 12 bit resolution - 0 - 4095 data codes which translates to 0 - 3.3V analog
-
-	uint32_t dacCode = (uint32_t)(( pct / 100.0 ) * 4095.0);
-	HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, dacCode);
-
-	currentDchgPct = pct;
-
-	//Start DAC
-	HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
-}
-
-void Charging_Enable(CHG_EN chg_en)
-{
-	if(chg_en == CHG_ENABLE)
-	{
-		HAL_GPIO_WritePin(GPIOB, CHG_EN_Pin, GPIO_PIN_SET);
-	}
-	else //Disabling charging
-	{
-		HAL_GPIO_WritePin(GPIOB, CHG_EN_Pin, GPIO_PIN_RESET);
-	}
-}
-
-void Change_State(STATE new_state)
-{
-	currentState = new_state;
-
-	//IDLE
-	if(currentState == IDLE)
-	{
-		Charging_Enable(CHG_DISABLE);
-		Discharging_Set(0); //Set discharge current to 0A
-	}
-	//CHARGING
-	else if(currentState == CHG)
-	{
-		Charging_Enable(CHG_ENABLE);
-		Discharging_Set(0); //Set discharge current to 0A
-	}
-	//DISCHARGING
-	else if (currentState == DCHG)
-	{
-		Charging_Enable(CHG_DISABLE);
-		Discharging_Set(10); //Set discharge current to 10%
-	}
-	else
-	{
-		//HANDLE DEFAULT CASE - MISRA C
-	}
-}
-
-void Safety_Loop()
-{
-	//Undervoltage - 2.8V
-	if(lastReadBattV < 2.8)
-	{
-		//Stop charging, stop discharging
-		//Change_State(IDLE);
-	}
-
-	//Overvoltage
-
-	//Overtemperature
-
-	//Overcurrent
-}
 
 /* USER CODE END 4 */
 
@@ -928,21 +676,7 @@ void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
-  for(;;)
-  {
-	  getLatestADCValues();
-	  calcSOC(lastReadBattV, currChargeRemaining);
-	  lastComputedPower = computePower(lastReadBattV);
 
-	  setupEnergyAvailableDischarge(currentCellSOC);
-
-	  if(calculateEnergyAvailableDischarge() == 1)
-		  lastComputedEnergy = getEnergyAvaialbelDischarge();
-
-	  updateOLED();
-	  //osDelay(1);
-	  taskYIELD();
-  }
   /* USER CODE END 5 */ 
 }
 

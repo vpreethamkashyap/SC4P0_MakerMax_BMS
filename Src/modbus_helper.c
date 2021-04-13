@@ -40,7 +40,10 @@ modbusData_t battVData;
 modbusData_t currentData;
 modbusData_t energyData;
 
-void enable_modbusrtu(void){
+extern uint8_t myBMSState;
+
+void enable_modbusrtu(void)
+{
 
 	eMBErrorCode    eStatus;
 
@@ -62,7 +65,7 @@ void updateModbusInputRegisters()
 	battVData.asFloat = lastReadBattV;
 	energyData.asFloat = lastComputedEnergy;
 
-	usRegInputBuf[0] = currentState;
+	usRegInputBuf[0] = myBMSState/*currentState*/;
 	usRegInputBuf[1] = powerData.asUInt32 >> 16;
 	usRegInputBuf[2] = powerData.asUInt32;
 	usRegInputBuf[3] = socData.asUInt32 >> 16;
@@ -75,13 +78,15 @@ void updateModbusInputRegisters()
 	usRegInputBuf[10] = energyData.asUInt32;
 }
 
-void modbus_task_init(void){
+void modbus_task_init(void)
+{
 	osThreadStaticDef(modbusTask, modbus_task, osPriorityNormal, 0, 1024, modbusTaskBuffer, &modbusTaskControlBlock);
 	modbusTaskHandle = osThreadCreate(osThread(modbusTask), NULL);
 }
 
 //modbus freertos task
-void modbus_task(void){
+void modbus_task(void)
+{
 
 	for(;;)
 	{

@@ -1,0 +1,4 @@
+can.c:73:6:can_task	8	static
+can.c:31:6:InitCAN	48	static
+can.c:66:6:can_task_init	48	static
+can.c:102:6:HAL_CAN_RxFifo0MsgPendingCallback	8	static
