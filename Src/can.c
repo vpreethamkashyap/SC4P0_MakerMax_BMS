@@ -96,7 +96,6 @@ void can_task (void)
 
 		taskYIELD();
 	}
-
 }
 
 void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)

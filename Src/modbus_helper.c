@@ -40,7 +40,6 @@ modbusData_t battVData;
 modbusData_t currentData;
 modbusData_t energyData;
 
-extern uint8_t myBMSState;
 
 void enable_modbusrtu(void)
 {
@@ -65,7 +64,7 @@ void updateModbusInputRegisters()
 	battVData.asFloat = lastReadBattV;
 	energyData.asFloat = lastComputedEnergy;
 
-	usRegInputBuf[0] = myBMSState/*currentState*/;
+	usRegInputBuf[0] = currentState;
 	usRegInputBuf[1] = powerData.asUInt32 >> 16;
 	usRegInputBuf[2] = powerData.asUInt32;
 	usRegInputBuf[3] = socData.asUInt32 >> 16;

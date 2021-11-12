@@ -46,8 +46,6 @@ float currChargeRemaining = 0; 		 //Ah how much charge is remaining inside the c
 float lastComputedPower = 0;
 float lastComputedEnergy = 0;		 //Wh
 
-extern uint8_t myBMSState;
-
 void bms_task_init(void)
 {
 	osThreadStaticDef(bmsTask, bms_task, osPriorityNormal, 0, 1024, bmsTaskBuffer, &bmsTaskControlBlock);
